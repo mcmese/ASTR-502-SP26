@@ -1,0 +1,56 @@
+import pandas as pd
+import glob
+
+
+my_targets_csv = "ASTR502_Mega_Target_List.csv"
+t16_csv_dir = "/Users/youngworlds/Mese/ASTR502/T16_master_lists/"   # directory containing ALL T16 CSVs
+
+
+# Read the target list
+my_df = pd.read_csv(my_targets_csv)
+
+my_df['tic_id_clean'] = (
+    my_df['tic_id']
+    .astype(str)
+    .str.replace('TIC', '', case=False)
+    .str.strip()
+)
+
+# Read and combine ALL T16 master CSVs
+t16_files = glob.glob(f"{t16_csv_dir}/*.csv")
+
+t16_dfs = []
+for f in t16_files:
+    df = pd.read_csv(f)
+
+    # Adjust column name if needed
+    df['tic_id_clean'] = (
+        df['TIC_ID']
+        .astype(str)
+        .str.replace('TIC', '', case=False)
+        .str.strip()
+    )
+
+    # Optional: store sector info from filename
+    df['source_file'] = f
+
+    t16_dfs.append(df[['tic_id_clean', 'source_file']])
+
+t16_all = pd.concat(t16_dfs, ignore_index=True)
+
+# Deduplicate TICs
+t16_all = t16_all.drop_duplicates(subset='tic_id_clean')
+
+# Crossmatch (INNER JOIN)
+matched = my_df.merge(
+    t16_all,
+    on='tic_id_clean',
+    how='inner'
+)
+
+
+print(f"Total targets in your list: {len(my_df)}")
+print(f"Targets with T16 light curves: {len(matched)}")
+
+# Save matched targets
+matched.to_csv("targets_with_T16.csv", index=False)
