@@ -1,0 +1,185 @@
+import os
+import numpy as np
+import pandas as pd
+from lightkurve import read
+from astropy.timeseries import LombScargle
+
+input_dir = "/Users/jmese/Downloads/ASTR 502/SPOC_Lightcurves"
+output_csv = "lc_metadata.csv"
+
+rows = []
+
+files = sorted([f for f in os.listdir(input_dir) if f.endswith(".fits")])
+
+for fname in files:
+    filepath = os.path.join(input_dir, fname)
+
+    try:
+        lc = read(filepath)
+    except Exception as e:
+        print(f"Failed to read {fname}: {e}")
+        continue
+
+    time = lc.time.value
+    flux = lc.flux.value
+
+    mask = np.isfinite(time) & np.isfinite(flux)
+    if mask.sum() < 10:
+        print(f"Skipping {fname}: insufficient data")
+        continue
+
+    t = time[mask]
+    f = flux[mask] - np.nanmedian(flux[mask])
+
+    # Lomb–Scargle
+    min_period = 0.05
+    max_period = 20.0
+    freq = np.linspace(1 / max_period, 1 / min_period, 10000)
+
+    ls = LombScargle(t, f)
+    power = ls.power(freq)
+
+    best_idx = np.argmax(power)
+    best_period = 1 / freq[best_idx]
+    best_power = power[best_idx]
+
+    amp = np.nanstd(flux) / np.nanmedian(flux)
+
+    ticid = lc.meta.get("TICID", np.nan)
+    sector = lc.meta.get("SECTOR", np.nan)
+
+    rows.append({
+        "filename": fname,
+        "ticid": ticid,
+        "sector": sector,
+        "star_period": best_period,
+        "star_power": best_power,
+        "amp": amp,
+        "adopted_period": best_period
+    })
+
+df = pd.DataFrame(rows)
+df.to_csv(output_csv, index=False)
+
+print(f"Saved metadata to {output_csv}")
+
+
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from lightkurve import read
+from astropy.timeseries import LombScargle
+
+def _bin_series_fixed_width(x, y, width):
+    if not np.isfinite(width) or width <= 0:
+        return np.array([]), np.array([])
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not mask.any():
+        return np.array([]), np.array([])
+    x_valid = x_arr[mask]
+    y_valid = y_arr[mask]
+    x_min = np.nanmin(x_valid)
+    x_max = np.nanmax(x_valid)
+    if not np.isfinite(x_min) or not np.isfinite(x_max):
+        return np.array([]), np.array([])
+    if x_min == x_max:
+        edges = np.array([x_min, x_min + width])
+    else:
+        edges = np.arange(x_min, x_max + width, width)
+        if edges.size < 2:
+            edges = np.array([x_min, x_max])
+    return _bin_series_by_edges(x_valid, y_valid, edges)
+
+def _bin_series_by_edges(x, y, edges):
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if not mask.any():
+        return np.array([]), np.array([])
+    x_valid = x_arr[mask]
+    y_valid = y_arr[mask]
+    inds = np.digitize(x_valid, edges) - 1
+    valid = (inds >= 0) & (inds < len(edges) - 1)
+    if not valid.any():
+        return np.array([]), np.array([])
+    x_valid = x_valid[valid]
+    y_valid = y_valid[valid]
+    inds = inds[valid]
+    centers = []
+    values = []
+    for idx in np.unique(inds):
+        bin_mask = inds == idx
+        if np.any(bin_mask):
+            centers.append(0.5 * (edges[idx] + edges[idx + 1]))
+            values.append(np.nanmean(y_valid[bin_mask]))
+    return np.array(centers), np.array(values)
+
+
+input_dir = "/Users/jmese/Downloads/ASTR 502/SPOC_Lightcurves"
+output_dir = "/Users/jmese/Downloads/ASTR 502/vetting_plots"
+meta_csv = "lc_metadata.csv"
+
+os.makedirs(output_dir, exist_ok=True)
+
+df = pd.read_csv(meta_csv)
+
+for _, row in df.iterrows():
+    fname = row["filename"]
+    filepath = os.path.join(input_dir, fname)
+
+    lc = read(filepath)
+    time = lc.time.value
+    flux = lc.flux.value
+
+    ticid = row["ticid"]
+    sector = row["sector"]
+    star_period = row["star_period"]
+    star_power = row["star_power"]
+    amp = row["amp"]
+    adopted_period = row["adopted_period"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+    ax_time, ax_phase, ax_two_phase, ax_ls = axes.flatten()
+
+
+    ax_time.scatter(time, flux, s=2, color="0.7", alpha=0.4)
+    bt, bf = _bin_series_fixed_width(time, flux, 4/24)
+    ax_time.scatter(bt, bf, s=16, color="k")
+    ax_time.set_title(f"TIC {ticid} flux vs time")
+
+
+    for ax, P, label in zip(
+        [ax_phase, ax_two_phase],
+        [star_period, 0.5 * star_period],
+        ["P", "P/2"]
+    ):
+        phase = np.mod(time - np.nanmin(time), P) / P
+        ax.scatter(phase, flux, s=2, color="0.7", alpha=0.4)
+        bp, bpf = _bin_series_by_edges(phase, flux, np.linspace(0, 1, 101))
+        ax.scatter(bp, bpf, s=16, color="k")
+        ax.set_title(f"TIC {ticid} folded at {label}")
+        ax.set_xlim(0, 1)
+
+
+    mask = np.isfinite(time) & np.isfinite(flux)
+    t = time[mask]
+    f = flux[mask] - np.nanmedian(flux[mask])
+
+    freq = np.linspace(1/20, 1/0.05, 10000)
+    power = LombScargle(t, f).power(freq)
+    periods = 1 / freq
+
+    ax_ls.plot(periods, power, "k")
+    ax_ls.axvline(star_period, color="crimson", lw=2)
+    ax_ls.axvline(0.5 * star_period, color="cyan", lw=2)
+    ax_ls.set_xscale("log")
+    ax_ls.set_title("Lomb–Scargle")
+
+
+    outname = f"TIC{ticid}_vetting.png"
+    plt.savefig(os.path.join(output_dir, outname), dpi=300)
+    plt.close()
